@@ -12,6 +12,7 @@ MAX_HEARTS = 5
 ALLY_SPAWN_INTERVAL = 6.0
 POWERUP_SPAWN_INTERVAL = 10.0
 SHIELD_DURATION = 3.0  # seconds
+SACRIFICE_TIMEOUT = 20.0  # seconds before big enemy spawns if not rescued
 FONT_NAME = None
 
 def clamp(x, a, b): return max(a, min(b, x))
@@ -75,7 +76,6 @@ class Enemy:
         else: self.x, self.y = WIDTH+20, random.randint(0, HEIGHT)
         self.radius = random.randint(12,18)
         self.speed = ENEMY_SPEED_BASE + random.random()*0.8
-        self.alive = True
 
     def update(self, dt, players):
         targets = [p for p in players if p.alive]
@@ -96,10 +96,34 @@ class Ally:
         self.radius = 12
         self.sacrifice_required = random.random() < 0.35
         self.rescued = False
+        self.spawn_time = pygame.time.get_ticks() / 1000
+        self.flash_timer = 0.0
+
+    def time_left(self):
+        if self.sacrifice_required and not self.rescued:
+            elapsed = pygame.time.get_ticks()/1000 - self.spawn_time
+            return max(0.0, SACRIFICE_TIMEOUT - elapsed)
+        return None
+
+    def try_flash(self, duration=1.0):
+        self.flash_timer = duration
+
+    def update(self, dt):
+        if self.flash_timer > 0:
+            self.flash_timer -= dt
+            if self.flash_timer < 0: self.flash_timer = 0
 
     def draw(self, surf):
         color = (240,230,140) if not self.rescued else (169,169,169)
         pygame.draw.circle(surf, color, (int(self.x), int(self.y)), self.radius)
+        if self.sacrifice_required and not self.rescued:
+            pygame.draw.circle(surf, (200,40,40), (int(self.x), int(self.y)), self.radius+4, 2)
+            draw_text(surf, "SACRIFICE", int(self.x)-40, int(self.y)-34, 16, (255,80,80))
+            remaining = self.time_left()
+            if remaining is not None:
+                draw_text(surf, f"{int(math.ceil(remaining))}", int(self.x)-8, int(self.y)-54, 20, (255,50,50))
+        if self.flash_timer > 0:
+            draw_text(surf, "Need Heart!", int(self.x)-28, int(self.y)-72, 18, (255,200,0))
 
 class HeartPowerUp:
     def __init__(self):
@@ -124,6 +148,7 @@ def draw_text(surf, txt, x, y, size=20, color=(255,255,255)):
     f = pygame.font.Font(FONT_NAME, size)
     surf.blit(f.render(txt, True, color), (x,y))
 
+# ---------- Screens ----------
 def menu_screen():
     while True:
         screen.fill((18,18,30))
@@ -142,29 +167,23 @@ def intro_screen():
     font_big = pygame.font.Font(FONT_NAME, 72)
     text = font_big.render("WE WORKED SO HARD FOR THIS", True, (255, 255, 255))
     text_rect = text.get_rect(center=(WIDTH//2, HEIGHT//2))
-
     duration = 5000
     start_time = pygame.time.get_ticks()
-
     while True:
         now = pygame.time.get_ticks()
         elapsed = now - start_time
         if elapsed >= duration: break
-
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 exit()
-
         if elapsed < 1000: alpha = int(255 * (elapsed / 1000))
         elif elapsed > 4000: alpha = int(255 * ((duration - elapsed) / 1000))
         else: alpha = 255
-
         screen.fill((0, 0, 0))
         text_surf = text.copy()
         text_surf.set_alpha(alpha)
         screen.blit(text_surf, text_rect)
-
         pygame.display.flip()
         clock.tick(60)
 
@@ -173,117 +192,136 @@ def game_loop(mode):
     p1_keys = {"up":pygame.K_w,"down":pygame.K_s,"left":pygame.K_a,"right":pygame.K_d,"rescue":pygame.K_e,"shield":pygame.K_q}
     p2_keys = {"up":pygame.K_UP,"down":pygame.K_DOWN,"left":pygame.K_LEFT,"right":pygame.K_RIGHT,"rescue":pygame.K_RETURN,"shield":pygame.K_RSHIFT}
 
-    if mode == 1:
-        players = [Player(WIDTH//2, HEIGHT//2, (30,144,255), p1_keys, "P1")]
-    else:
-        p1 = Player(WIDTH//3, HEIGHT//2, (30,144,255), p1_keys, "P1")
-        p2 = Player(2*WIDTH//3, HEIGHT//2, (50,205,50), p2_keys, "P2")
-        players = [p1, p2]
-
-    enemies, allies, powerups = [], [], []
-    spawn_enemy, spawn_ally, spawn_power = 0,0,0
-    score, rescued = 0,0
-    game_over = False
-
     while True:
-        dt = clock.tick(FPS)/1000.0
-        keys = pygame.key.get_pressed()
-
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT: return
-            if e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE: return
-            for p in players:
-                if not p.alive: continue
-                if e.type == pygame.KEYDOWN:
-                    if e.key == p.keys["shield"] and p.hearts>0:
-                        p.hearts -= 1
-                        p.shield_active = True
-                        p.shield_timer = SHIELD_DURATION
-                    if e.key == p.keys["rescue"]:
-                        for ally in allies:
-                            if not ally.rescued and distance(p.pos(), (ally.x,ally.y))<40:
-                                if ally.sacrifice_required:
-                                    if p.hearts>0: p.hearts -=1; ally.rescued=True; score+=200; rescued+=1
-                                else: ally.rescued=True; score+=100; rescued+=1
-
-        # update players
-        for p in players: p.update(dt, keys)
-        # spawn timers
-        spawn_enemy += dt; spawn_ally += dt; spawn_power += dt
-        if spawn_enemy > ENEMY_SPAWN_INTERVAL: enemies.append(Enemy()); spawn_enemy=0
-        if spawn_ally > ALLY_SPAWN_INTERVAL: allies.append(Ally()); spawn_ally=0
-        if spawn_power > POWERUP_SPAWN_INTERVAL: powerups.append(HeartPowerUp()); spawn_power=0
-
-        # update enemies
-        for e in enemies: e.update(dt, players)
-
-        # collisions
-        for e in enemies:
-            for p in players:
-                if p.alive and distance((e.x,e.y), p.pos()) < e.radius+p.radius:
-                    if p.shield_active:
-                        # shield blocks player hit
-                        continue
-                    else:
-                        p.hearts -=1
-                        if p.hearts<=0: p.alive=False
-
-            # shield protects allies
-            for ally in allies:
-                if not ally.rescued and distance((e.x,e.y), (ally.x, ally.y)) < e.radius+ally.radius:
-                    # check if any shield is near
-                    protected = any(p.shield_active and distance(p.pos(), (ally.x, ally.y)) <= p.radius*2.5 for p in players)
-                    if protected:
-                        # push enemy away from shield
-                        for p in players:
-                            if p.shield_active and distance(p.pos(), (ally.x, ally.y)) <= p.radius*2.5:
-                                dx = e.x - p.x
-                                dy = e.y - p.y
-                                mag = math.hypot(dx, dy)
-                                if mag > 0:
-                                    e.x += (dx/mag) * e.speed * dt * 60
-                                    e.y += (dy/mag) * e.speed * dt * 60
-                                break
-                    else:
-                        # could implement ally penalty if desired
-                        pass
-
-        # powerups
-        for p in players:
-            for pw in powerups:
-                if pw.active and distance(p.pos(), (pw.x,pw.y)) < p.radius+pw.radius:
-                    if p.hearts<MAX_HEARTS: p.hearts+=1
-                    pw.active=False
-
-        # check game over
-        if not any(p.alive for p in players): game_over=True
-
-        # draw
-        screen.fill((25,25,40))
-        for ally in allies: ally.draw(screen)
-        for e in enemies: e.draw(screen)
-        for pw in powerups: pw.draw(screen)
-        for p in players: p.draw(screen)
-
-        draw_text(screen,f"Score: {score}",20,20)
-        draw_text(screen,f"Rescued: {rescued}",20,50)
-        if len(players) >= 1:
-            draw_hearts(screen, WIDTH-200, 20, players[0].hearts, (30,144,255))
-            draw_text(screen,"P1", WIDTH-200, 50, 18,(200,200,255))
-        if len(players) == 2:
-            draw_hearts(screen, WIDTH-200, 80, players[1].hearts, (50,205,50))
-            draw_text(screen,"P2", WIDTH-200, 110, 18,(200,255,200))
-
-        if game_over:
-            draw_text(screen,"GAME OVER", WIDTH//2-100, HEIGHT//2, 48, (255,180,180))
-
-        # controls
-        if len(players) == 1:
-            draw_text(screen, "P1 Controls: Move=WASD | Rescue=E | Shield=Q", 20, HEIGHT-30, 18, (200,200,200))
+        if mode == 1:
+            players = [Player(WIDTH//2, HEIGHT//2, (30,144,255), p1_keys, "P1")]
         else:
-            draw_text(screen, "P1: WASD Move | Rescue=E | Shield=Q     P2: Arrow Keys Move | Rescue=Enter | Shield=Right Shift", 20, HEIGHT-30, 18, (200,200,200))
+            p1 = Player(WIDTH//3, HEIGHT//2, (30,144,255), p1_keys, "P1")
+            p2 = Player(2*WIDTH//3, HEIGHT//2, (50,205,50), p2_keys, "P2")
+            players = [p1, p2]
 
-        pygame.display.flip()
+        enemies, allies, powerups = [], [], []
+        spawn_enemy = spawn_ally = spawn_power = 0
+        score = rescued = 0
+        game_over = False
+
+        while True:
+            dt = clock.tick(FPS)/1000.0
+            keys = pygame.key.get_pressed()
+
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT: pygame.quit(); exit()
+                if e.type == pygame.KEYDOWN:
+                    if e.key == pygame.K_ESCAPE: pygame.quit(); exit()
+                    if game_over and e.key == pygame.K_r:
+                        break
+                    for p in players:
+                        if not p.alive: continue
+                        if e.key == p.keys["shield"]:
+                            if p.hearts>0:
+                                p.hearts -= 1
+                                p.shield_active = True
+                                p.shield_timer = SHIELD_DURATION
+                        if e.key == p.keys["rescue"]:
+                            for ally in allies:
+                                if ally.rescued: continue
+                                if distance(p.pos(), (ally.x, ally.y)) < 40:
+                                    if ally.sacrifice_required:
+                                        if p.hearts > 0:
+                                            p.hearts -= 1
+                                            ally.rescued = True
+                                            score += 200
+                                            rescued += 1
+                                            if p.hearts <= 0:
+                                                p.alive = False
+                                        else:
+                                            ally.try_flash(1.0)
+                                    else:
+                                        ally.rescued = True
+                                        score += 100
+                                        rescued += 1
+            else:
+                if not game_over:
+                    for p in players: p.update(dt, keys)
+                    for ally in allies: ally.update(dt)
+                    spawn_enemy += dt; spawn_ally += dt; spawn_power += dt
+                    if spawn_enemy > ENEMY_SPAWN_INTERVAL: enemies.append(Enemy()); spawn_enemy=0
+                    if spawn_ally > ALLY_SPAWN_INTERVAL: allies.append(Ally()); spawn_ally=0
+                    if spawn_power > POWERUP_SPAWN_INTERVAL: powerups.append(HeartPowerUp()); spawn_power=0
+                    for e in enemies: e.update(dt, players)
+
+                    # ---- Collision with shield logic ----
+                    for e in enemies[:]:
+                        for p in players:
+                            if p.alive and distance((e.x,e.y), p.pos()) < e.radius + p.radius:
+                                if p.shield_active:
+                                    p.shield_active = False  # shield disappears
+                                else:
+                                    p.hearts -= 1
+                                    if p.hearts <= 0: p.alive = False
+                                if e in enemies: enemies.remove(e)
+                                break
+
+                    for ally in allies[:]:
+                        if ally.sacrifice_required and not ally.rescued:
+                            if ally.time_left() <= 0:
+                                big_enemy = Enemy()
+                                big_enemy.x, big_enemy.y = ally.x, ally.y
+                                big_enemy.radius = 30
+                                big_enemy.speed = ENEMY_SPEED_BASE * 0.8 + 0.3
+                                enemies.append(big_enemy)
+                                allies.remove(ally)
+
+                    for e in enemies:
+                        for ally in allies:
+                            if not ally.rescued and distance((e.x,e.y), (ally.x, ally.y)) < e.radius + ally.radius:
+                                protected = any(p.shield_active and distance(p.pos(), (ally.x, ally.y)) <= p.radius*2.5 for p in players)
+                                if protected:
+                                    for p in players:
+                                        if p.shield_active and distance(p.pos(), (ally.x, ally.y)) <= p.radius*2.5:
+                                            dx = e.x - p.x
+                                            dy = e.y - p.y
+                                            mag = math.hypot(dx, dy)
+                                            if mag > 0:
+                                                e.x += (dx/mag) * e.speed * dt * 60
+                                                e.y += (dy/mag) * e.speed * dt * 60
+                                            break
+
+                    for p in players:
+                        for pw in powerups:
+                            if pw.active and distance(p.pos(), (pw.x,pw.y)) < p.radius + pw.radius:
+                                if p.hearts < MAX_HEARTS: p.hearts += 1
+                                pw.active = False
+
+                    if not any(p.alive for p in players): game_over = True
+
+                screen.fill((25,25,40))
+                for ally in allies: ally.draw(screen)
+                for e in enemies: e.draw(screen)
+                for pw in powerups: pw.draw(screen)
+                for p in players: p.draw(screen)
+
+                draw_text(screen, f"Score: {score}", 20, 20)
+                draw_text(screen, f"Rescued: {rescued}", 20, 50)
+                if len(players) >= 1:
+                    draw_hearts(screen, WIDTH-200, 20, players[0].hearts, (30,144,255))
+                    draw_text(screen, "P1", WIDTH-200, 50, 18, (200,200,255))
+                if len(players) == 2:
+                    draw_hearts(screen, WIDTH-200, 80, players[1].hearts, (50,205,50))
+                    draw_text(screen, "P2", WIDTH-200, 110, 18, (200,255,200))
+
+                if game_over:
+                    draw_text(screen, "GAME OVER", WIDTH//2-100, HEIGHT//2, 48, (255,180,180))
+                    draw_text(screen, "Press R to Restart or ESC to Quit", WIDTH//2-180, HEIGHT//2+60, 28, (200,200,200))
+
+                if len(players) == 1:
+                    draw_text(screen, "P1 Controls: Move=WASD | Rescue=E | Shield=Q", 20, HEIGHT-30, 18, (200,200,200))
+                else:
+                    draw_text(screen, "P1: WASD Move | Rescue=E | Shield=Q     P2: Arrow Keys Move | Rescue=Enter | Shield=Right Shift", 20, HEIGHT-30, 18, (200,200,200))
+
+                pygame.display.flip()
+                continue
+            break
 
 # ---------- Run ----------
 mode = menu_screen()
